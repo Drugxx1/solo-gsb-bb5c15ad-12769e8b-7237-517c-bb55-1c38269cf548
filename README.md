@@ -855,7 +855,7 @@ app/
   engine.py           # 半开区间、扫描线 AND/OR 合并、持续时长过滤、证据、条件复位阈值（迟滞锁存）、通道采样有效期(TTL)截断、维护扣除/抑制、区间聚类（事件归并）、草稿影响对比（diff_faults）、规则组合故障日账切分（daily_fault_ledger / utc_midnight）
 
   db.py               # SQLite 连接、建表（imports/import_snapshots 导入批次与导入前快照、channel_ttls 与 rule_conditions.reset_threshold，含老库自动加列迁移）、基础查询、upsert/快照写入
-  services.py         # JSONL 导入（导入前快照、导入后自动重算）、导入批次列表与批次撤销（undo_import，事务删除/恢复+刷新故障）、规则评估、草稿预览（preview_rule）、采样有效期设置/清除、时间轴抽样、筛选、故障事件归并、被抑制片段、规则组合故障日账（query_fault_daily_ledger）、采样节拍稽核（query_sampling_audit，只读 events）、冗余通道一致性核查（query_channel_consistency，只读 events/channel_ttls）、规则故障先后配对（query_fault_pairing，只读 fault_intervals）、单通道突变恢复诊断（query_mutation_recovery，只读 events/channel_ttls）、导出
+  services.py         # JSONL 导入（导入前快照、导入后自动重算）、导入批次列表与批次撤销（undo_import，事务删除/恢复+刷新故障）、规则评估、草稿预览（preview_rule）、采样有效期设置/清除、时间轴抽样（downsample 有界极值抽样：保留范围首尾，中间按时间分桶、预算内优先取每桶最小/最大值，单点桶取偏离桶首尾基线更大的极值，按 (时间戳, 事件 ID) 原序输出且不超过 max_points）、筛选、故障事件归并、被抑制片段、规则组合故障日账（query_fault_daily_ledger）、采样节拍稽核（query_sampling_audit，只读 events）、冗余通道一致性核查（query_channel_consistency，只读 events/channel_ttls）、规则故障先后配对（query_fault_pairing，只读 fault_intervals）、单通道突变恢复诊断（query_mutation_recovery，只读 events/channel_ttls）、导出
   main.py             # FastAPI 路由与静态页面（含 /api/imports 列表与 /api/imports/{id}/undo 撤销、/api/channel-ttls、只读 /api/fault-daily-ledger、只读 /api/sampling-audit、只读 /api/consistency-check、只读 /api/fault-pairing 与只读 /api/mutation-recovery；条件复位阈值校验）
   static/             # 原生 JS 前端（index.html / app.js / styles.css，侧栏含「导入批次 / 撤销」卡片与撤销入口、规则弹层内含「预览影响」与每条件「复位阈值」、侧栏含「采样有效期」卡片与泳道 TTL 徽标、故障卡片下含「规则组合故障日账」勾选与逐日表格、「采样节拍稽核」通道选择/参数表单/汇总与缺采段表格、「冗余通道一致性核查」双通道选择/阈值表单/汇总与不一致片段表格、「规则故障先后配对」双规则选择/最大滞后表单/配对与未配对表格、「单通道突变恢复诊断」通道选择/阈值/容差/观察时长表单与逐段起止样本/最大偏差/恢复耗时/未恢复原因表格）
 samples/

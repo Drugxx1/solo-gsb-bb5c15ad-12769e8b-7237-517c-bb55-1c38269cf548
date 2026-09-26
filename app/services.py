@@ -1251,22 +1251,107 @@ def query_annotations(start: float | None = None, end: float | None = None) -> l
     ]
 
 
-def downsample(values: list[tuple[float, float, int]], max_points: int) -> list[tuple[float, float, int]]:
-    """Stride downsample; first/last points are always kept.
+def _bucket_baseline(first: tuple[float, float, int], last: tuple[float, float, int]) -> tuple[float, float]:
+    """Line through a bucket's first/last samples as ``(intercept, slope)``.
 
-    values: (ts, value, event_id) sorted by ts.  A stride (rather than bucket
-    averaging) preserves the step-plot shape of held signals.
+    The baseline interpolates the bucket's endpoints by timestamp; when they
+    share a timestamp it degenerates to the constant value of the first one.
     """
-    if len(values) <= max_points or max_points < 2:
+    first_ts, first_v, _ = first
+    last_ts, last_v, _ = last
+    span = last_ts - first_ts
+    if span == 0:
+        return first_v, 0.0
+    slope = (last_v - first_v) / span
+    return first_v - slope * first_ts, slope
+
+
+def _bucket_deviation(
+    sample: tuple[float, float, int], baseline: tuple[float, float]
+) -> float:
+    """Absolute vertical distance of one sample from the bucket baseline."""
+    ts, value, _ = sample
+    intercept, slope = baseline
+    return abs(value - (intercept + slope * ts))
+
+
+def downsample(values: list[tuple[float, float, int]], max_points: int) -> list[tuple[float, float, int]]:
+    """Bounded min/max (extrema) downsampling preserving spikes and dips.
+
+    ``values`` are ``(ts, value, event_id)`` tuples sorted by (ts, id).  The
+    first and last sample in the queried range are always kept, anchoring the
+    step plot at both ends.  The middle samples are split, in chronological
+    order, into near-even buckets; within the remaining point budget each
+    bucket contributes its minimum and maximum — so an isolated spike landing
+    inside a bucket is never silently dropped the way a fixed stride would.
+
+    When the budget only allows one point for a bucket, the extremum that
+    deviates more from the line through the bucket's own first/last samples
+    is taken; an exact tie is resolved stably in favour of the extremum that
+    appears first.  The returned samples are ordered by (ts, event_id) and
+    never exceed ``max_points``; under-budget inputs come back untouched.
+    """
+    n = len(values)
+    if n == 0:
         return values
-    step = len(values) / max_points
-    picked = [values[0]]
-    index = step
-    while index < len(values) - 1:
-        picked.append(values[int(index)])
-        index += step
-    picked.append(values[-1])
-    return picked
+    if max_points <= 0:
+        return []
+    if max_points == 1:
+        return values[:1]
+    if n <= max_points:
+        return values
+    if max_points == 2:
+        return [values[0], values[-1]]
+
+    middle = values[1:-1]
+    budget = max_points - 2
+    # Split the middle into k near-even buckets (larger ones first), so the
+    # possible single-slot bucket (when the budget is odd) ends up last.
+    k = (budget + 1) // 2
+    base, extra = divmod(len(middle), k)
+    buckets: list[list[tuple[float, float, int]]] = []
+    cursor = 0
+    for index in range(k):
+        size = base + (1 if index < extra else 0)
+        buckets.append(middle[cursor : cursor + size])
+        cursor += size
+
+    # floor(budget/2) buckets get two slots (minimum and maximum); when the
+    # budget is odd the final bucket gets a single extremum slot.
+    two_slot_buckets = budget // 2
+
+    picked_positions: set[int] = {0, n - 1}
+    start = 1
+    for index, bucket in enumerate(buckets):
+        # First occurrence of the minimum/maximum value: stable tie-breaking.
+        min_pos = max_pos = 0
+        for pos in range(1, len(bucket)):
+            if bucket[pos][1] < bucket[min_pos][1]:
+                min_pos = pos
+            if bucket[pos][1] > bucket[max_pos][1]:
+                max_pos = pos
+
+        if index < two_slot_buckets:
+            picked_positions.add(start + min_pos)
+            picked_positions.add(start + max_pos)
+            start += len(bucket)
+            continue
+
+        # One point for this bucket: the extremum further from the line
+        # through the bucket's own endpoints; equal deviations keep the one
+        # that appears first (identical when the bucket is constant).
+        baseline = _bucket_baseline(bucket[0], bucket[-1])
+        min_sample = bucket[min_pos]
+        max_sample = bucket[max_pos]
+        min_dev = _bucket_deviation(min_sample, baseline)
+        max_dev = _bucket_deviation(max_sample, baseline)
+        if max_dev > min_dev or (max_dev == min_dev and max_pos < min_pos):
+            picked_positions.add(start + max_pos)
+        else:
+            picked_positions.add(start + min_pos)
+        start += len(bucket)
+
+    return [values[p] for p in sorted(picked_positions)]
 
 
 def timeline_data(start: float | None, end: float | None, max_points: int = 400) -> dict:
