@@ -1251,21 +1251,93 @@ def query_annotations(start: float | None = None, end: float | None = None) -> l
     ]
 
 
-def downsample(values: list[tuple[float, float, int]], max_points: int) -> list[tuple[float, float, int]]:
-    """Stride downsample; first/last points are always kept.
+def _bucket_extremes(
+    bucket: list[tuple[float, float, int]],
+) -> list[tuple[float, float, int]]:
+    """A bucket's minimum and maximum samples (first occurrence wins ties).
 
-    values: (ts, value, event_id) sorted by ts.  A stride (rather than bucket
-    averaging) preserves the step-plot shape of held signals.
+    Both extrema are kept so an isolated spike inside the bucket survives
+    sampling; a constant (or single-sample) bucket contributes its sample
+    only once.
     """
-    if len(values) <= max_points or max_points < 2:
+    low = min(bucket, key=lambda p: p[1])
+    high = max(bucket, key=lambda p: p[1])
+    if low is high:
+        return [low]
+    return [low, high]
+
+
+def _largest_deviation_extreme(
+    bucket: list[tuple[float, float, int]],
+) -> tuple[float, float, int]:
+    """The single bucket extreme to keep when the budget allows only one.
+
+    Between the bucket's minimum and maximum candidates, the one deviating
+    more from the bucket's own first→last baseline (the straight line
+    between the bucket's first and last samples) is kept; equal deviations
+    resolve stably to the sample appearing first in (ts, event id) order.
+    """
+    low = min(bucket, key=lambda p: p[1])
+    high = max(bucket, key=lambda p: p[1])
+    if low is high:
+        return low
+    (t0, v0, _), (t1, v1, _) = bucket[0], bucket[-1]
+
+    def deviation(p: tuple[float, float, int]) -> float:
+        if t1 == t0:
+            return abs(p[1] - v0)
+        baseline = v0 + (v1 - v0) * (p[0] - t0) / (t1 - t0)
+        return abs(p[1] - baseline)
+
+    dev_low, dev_high = deviation(low), deviation(high)
+    if dev_low > dev_high:
+        return low
+    if dev_high > dev_low:
+        return high
+    return min((low, high), key=lambda p: (p[0], p[2]))
+
+
+def downsample(values: list[tuple[float, float, int]], max_points: int) -> list[tuple[float, float, int]]:
+    """Bounded extreme-value sampling; never returns more than max_points.
+
+    values: (ts, value, event_id) sorted by (ts, id).  A series that fits
+    the budget is returned unchanged.  Otherwise the first and last samples
+    of the queried range are always kept, the middle samples are split into
+    time-ordered buckets, and — within the remaining point budget — each
+    bucket contributes its minimum and maximum (so isolated spikes survive,
+    unlike stride sampling).  An odd budget leaves a single slot for the
+    last bucket, which keeps the extreme deviating most from its own
+    first→last baseline (ties keep the earlier sample).  The result is
+    emitted in the original (ts, event id) order.
+    """
+    n = len(values)
+    if n <= max_points:
         return values
-    step = len(values) / max_points
+    if max_points <= 0:
+        return []
+    if max_points == 1:
+        return values[:1]
+
+    middle = values[1:-1]
+    budget = max_points - 2  # point slots left for middle samples
+    if budget <= 0:
+        return [values[0], values[-1]]
+    bucket_count = (budget + 1) // 2  # each bucket wants min+max
+    base, extra = divmod(len(middle), bucket_count)
     picked = [values[0]]
-    index = step
-    while index < len(values) - 1:
-        picked.append(values[int(index)])
-        index += step
+    start = 0
+    for i in range(bucket_count):
+        size = base + (1 if i < extra else 0)
+        bucket = middle[start : start + size]
+        start += size
+        # Even budget: min+max per bucket; an odd budget leaves one slot
+        # for the last bucket.
+        if budget % 2 == 1 and i == bucket_count - 1:
+            picked.append(_largest_deviation_extreme(bucket))
+        else:
+            picked.extend(_bucket_extremes(bucket))
     picked.append(values[-1])
+    picked.sort(key=lambda p: (p[0], p[2]))
     return picked
 
 

@@ -440,6 +440,19 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
   （`iv.end > start AND iv.start < end`）。
 - 筛选同时作用于时间轴、故障列表、故障事件列表、标注列表、维护窗口列表、原始事件表和导出。
 
+## 时间轴通道抽样（有界极值抽样）
+
+`GET /api/timeline` 对每个通道的范围内样本按 `max_points`（默认 400，2~5000）做**有界极值抽样**，
+只影响通道曲线的展示点；`count` / `shown` 以及故障、维护、被抑制片段、标注等图层始终使用原始数据：
+
+- 范围内样本数不超过 `max_points` 时**全部返回**，不抽样。
+- 超预算时**首尾样本必保留**，中间样本按时间顺序均匀分桶；在剩余点数预算
+  （`max_points − 2`）内每个桶优先贡献**最小值与最大值**两个样本，因此孤立尖峰 / 低谷不会被
+  丢弃（不会像固定步长抽样那样把异常画成平线），返回点数**绝不超过** `max_points`。
+- 预算为奇数时最后一个桶只剩 **1 个点数槽位**：取该桶最小 / 最大候选中**偏离桶自身首尾连线基线
+  更大**的极值，平局时稳定取（时间戳、事件 ID）先出现者；常数桶的最小最大为同一样本，只计一次。
+- 返回点按**（时间戳、事件 ID）原序**输出，前端仍按阶梯曲线连接。
+
 ## 故障事件归并语义
 
 「故障事件」是**只读派生视图**，不改写、不删除 `fault_intervals` 中的任何原始故障结果：
@@ -826,7 +839,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `GET/POST /api/maintenance`，`GET/PUT/DELETE /api/maintenance/{id}` | 计划维护窗口增删改查（按设备、半开区间；写入后自动重新评估全部规则并返回评估摘要） |
 | `GET /api/suppressed?start&end` | 被维护抑制的片段（关联规则与来源维护窗口，半开相交筛选）；片段按维护窗口边界拆分，每段仅携带实际覆盖它的窗口 ID（重叠共同归因、相接在交界处切换） |
 | `GET/POST /api/annotations`，`DELETE /api/annotations/{id}` | 区间标注 |
-| `GET /api/timeline?start&end&max_points` | 时间轴聚合数据（通道抽样、故障、维护窗口、被抑制片段、标注） |
+| `GET /api/timeline?start&end&max_points` | 时间轴聚合数据（通道有界极值抽样：首尾必留、中间分桶取各桶最小/最大、单槽位取偏离桶首尾基线更大者，点数不超 `max_points`；`count`/`shown` 与故障、维护窗口、被抑制片段、标注仍用原数据） |
 | `GET /api/export?start&end&download=true` | 导出完整 JSON（附件下载，含维护窗口与被抑制片段） |
 | `POST /api/demo` | 载入内置示例数据与规则（同样记录批次快照，可在「导入批次」中撤销） |
 | `POST /api/reset` | 清空全部数据（事件、规则、故障、维护、标注，以及导入批次与导入前快照） |
@@ -855,12 +868,13 @@ app/
   engine.py           # 半开区间、扫描线 AND/OR 合并、持续时长过滤、证据、条件复位阈值（迟滞锁存）、通道采样有效期(TTL)截断、维护扣除/抑制、区间聚类（事件归并）、草稿影响对比（diff_faults）、规则组合故障日账切分（daily_fault_ledger / utc_midnight）
 
   db.py               # SQLite 连接、建表（imports/import_snapshots 导入批次与导入前快照、channel_ttls 与 rule_conditions.reset_threshold，含老库自动加列迁移）、基础查询、upsert/快照写入
-  services.py         # JSONL 导入（导入前快照、导入后自动重算）、导入批次列表与批次撤销（undo_import，事务删除/恢复+刷新故障）、规则评估、草稿预览（preview_rule）、采样有效期设置/清除、时间轴抽样、筛选、故障事件归并、被抑制片段、规则组合故障日账（query_fault_daily_ledger）、采样节拍稽核（query_sampling_audit，只读 events）、冗余通道一致性核查（query_channel_consistency，只读 events/channel_ttls）、规则故障先后配对（query_fault_pairing，只读 fault_intervals）、单通道突变恢复诊断（query_mutation_recovery，只读 events/channel_ttls）、导出
+  services.py         # JSONL 导入（导入前快照、导入后自动重算）、导入批次列表与批次撤销（undo_import，事务删除/恢复+刷新故障）、规则评估、草稿预览（preview_rule）、采样有效期设置/清除、时间轴有界极值抽样（downsample：首尾必留、中间分桶取各桶最小/最大、单槽位取偏离桶首尾基线更大者、按原序输出且不超 max_points）、筛选、故障事件归并、被抑制片段、规则组合故障日账（query_fault_daily_ledger）、采样节拍稽核（query_sampling_audit，只读 events）、冗余通道一致性核查（query_channel_consistency，只读 events/channel_ttls）、规则故障先后配对（query_fault_pairing，只读 fault_intervals）、单通道突变恢复诊断（query_mutation_recovery，只读 events/channel_ttls）、导出
   main.py             # FastAPI 路由与静态页面（含 /api/imports 列表与 /api/imports/{id}/undo 撤销、/api/channel-ttls、只读 /api/fault-daily-ledger、只读 /api/sampling-audit、只读 /api/consistency-check、只读 /api/fault-pairing 与只读 /api/mutation-recovery；条件复位阈值校验）
   static/             # 原生 JS 前端（index.html / app.js / styles.css，侧栏含「导入批次 / 撤销」卡片与撤销入口、规则弹层内含「预览影响」与每条件「复位阈值」、侧栏含「采样有效期」卡片与泳道 TTL 徽标、故障卡片下含「规则组合故障日账」勾选与逐日表格、「采样节拍稽核」通道选择/参数表单/汇总与缺采段表格、「冗余通道一致性核查」双通道选择/阈值表单/汇总与不一致片段表格、「规则故障先后配对」双规则选择/最大滞后表单/配对与未配对表格、「单通道突变恢复诊断」通道选择/阈值/容差/观察时长表单与逐段起止样本/最大偏差/恢复耗时/未恢复原因表格）
 samples/
   telemetry.jsonl     # 示例数据（generate_sample.py 可再生成）
 tests/
+  test_downsample.py  # 时间轴有界极值抽样：不超预算全返回、点数不超 max_points、首尾必留、孤立尖峰/低谷保留、桶最小最大同取、单槽位取偏离桶首尾基线更大者（含倾斜基线）、平局取先出现者、奇数预算单槽落末桶、常数桶只计一次、小预算边界、/api/timeline 端到端（count/shown 与故障/维护图层仍用原数据）
   test_engine.py        # 引擎单元测试（pytest）
   test_fault_events.py  # 故障事件归并、传递链、窗口语义测试
   test_maintenance.py   # 维护窗口合并/扣除、持续时长重置、证据边界、被抑制片段测试
@@ -922,4 +936,8 @@ UTC 午夜切分、跨日片段只在起始日计新起 / 后续日计延续、�
 已到期不外推、TTL 到期空档切断连续性（不跨空档判突变 / 恢复，空档与观察时长按时刻先后定原因）、
 已归属片段的样本不重复开段（恢复样本不反向开段、观察超时后同点可作为新突变起始）、三类未恢复原因
 （观察超时 / 有效期空档 / 范围结束）、最大偏差及样本、半开右端、同刻后值覆盖、非正阈值 / 观察时长、
-负容差与非有限参数拒绝、未知通道 404、接口只读不写事件或故障结果。
+负容差与非有限参数拒绝、未知通道 404、接口只读不写事件或故障结果；以及**时间轴通道有界极值抽样**
+的未超预算原样返回、返回点数不超过 `max_points`、范围内首尾样本必留、中间分桶各桶最小值与最大值
+同取（孤立尖峰 / 低谷不再丢失）、单槽位桶取偏离自身首尾连线基线更大的极值（倾斜基线按线性插值，
+平局取先出现者）、奇数预算单槽落末桶、常数桶只计一次、极小预算边界，以及 `/api/timeline` 的
+`count`/`shown` 与故障、维护等图层不受抽样影响、通道点按（时间戳、事件 ID）原序输出。
